@@ -1,2 +1,3 @@
-# Robotica_Visual_Computing
-Repositório que contém todo o material e código utilizado para a implementação das funcionalidades de navegação automática da empilhadeira utilizano visão computacional.
+# ENG4061_Projeto_Empilhadeira
+Repositório que contém todo o material e código utilizado para a implementação das funcionalidades do robô empilhadeira.
+
