@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BROKER = os.getenv("BROKER")     
-PORT = os.getenv("PORT")
+PORT = int(os.getenv("PORT"))
 
 # Variáveis globais
 arduino_serial = None 

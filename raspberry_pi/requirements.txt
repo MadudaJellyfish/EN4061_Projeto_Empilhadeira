@@ -1,0 +1,3 @@
+cv2
+pupil-apriltags
+numpy
