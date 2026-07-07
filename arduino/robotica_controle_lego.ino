@@ -161,6 +161,21 @@ void atualizaVelocidadeRodas() {
   float dt = (tempoAtual - tempoAnteriorPID) / 1000.0;
 
   if (dt >= 0.1) {
+    // ====================================================================
+    // NOVO: Trava de Parada Absoluta! 
+    // Se a ordem for parar, não calcula PID, apenas corta a energia.
+    // ====================================================================
+    if (setpoint_RPM_M1 == 0.0 && setpoint_RPM_M2 == 0.0) {
+      parar();
+      zeraPID(); // Limpa qualquer "sujeira" matemática acumulada
+      noInterrupts();
+      pulsosMotor1 = 0;
+      pulsosMotor2 = 0;
+      interrupts();
+      tempoAnteriorPID = tempoAtual;
+      return; // Interrompe a função aqui, impedindo o robô de tremer
+    }
+
     // Copia e zera os contadores com as interrupções desligadas (evita corrida).
     noInterrupts();
     long p1 = pulsosMotor1;
