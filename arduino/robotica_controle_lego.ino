@@ -35,33 +35,38 @@ const unsigned long TIMEOUT_VISAO = 1500;  // ms sem ver a tag => consideramos "
 
 // --- Velocidade (PWM, 0 a 255). SEM PID: é a força que vai direto pro motor. ---
 // Comece baixo. Se o robô não sair do lugar, aumente. Se andar rápido demais, diminua.
-const int VEL_PROCURA = 140;   // velocidade durante a busca
+const int VEL_PROCURA = 140;   // velocidade durante a busca (giro e avanço)
 const int VEL_APROX   = 150;   // velocidade durante a aproximação
 
 // --- Duração dos "passos curtos" (ms) ---
-// MOVER = quanto tempo ele anda em cada passo. PAUSA = quanto tempo ele para
+// MOVER = quanto tempo ele anda/gira em cada passo. PAUSA = quanto tempo ele para
 // entre um passo e outro (parado a câmera enxerga melhor, sem borrão).
-const unsigned long PROC_MOVER_MS  = 350;   // passo de busca: tempo andando
+const unsigned long PROC_MOVER_MS  = 350;   // passo de busca: tempo girando/andando
 const unsigned long PROC_PAUSA_MS  = 400;   // passo de busca: tempo parado olhando
 const unsigned long APROX_MOVER_MS = 250;   // passo de aproximação: tempo andando
 const unsigned long APROX_PAUSA_MS = 350;   // passo de aproximação: tempo parado
 
-// --- Critérios de chegada ---
-const float DIST_ALVO = 0.80;   // (m) considera "perto o suficiente" abaixo disso
-const float ANG_ALVO  = 8.0;    // (graus) considera "centralizado" abaixo disso
+// --- Busca girando no próprio eixo ---------------------------------------------------
+// Como não há encoder, a "volta de 360°" é feita por número de passinhos de giro.
+// CALIBRAÇÃO: ponha o robô pra buscar e conte quantos passos ele leva pra dar uma volta
+//             completa. Ajuste PASSOS_POR_VOLTA até fechar ~360°.
+const int PASSOS_POR_VOLTA = 13;   // quantos passos de giro completam ~uma volta
+const int PASSOS_AVANCO    = 5;    // quantos passos à frente dar antes de girar de novo
 
-// --- Sequência de busca (edite à vontade!) ---
-// Códigos: 0 = frente, 1 = vira direita, 2 = vira esquerda
-// O padrão {0,1,2,0} faz: frente -> direita -> esquerda -> frente -> (repete)
-const int SEQ_BUSCA[] = {0, 1, 1, 2, 2, 0};
-const int NUM_PASSOS = sizeof(SEQ_BUSCA) / sizeof(SEQ_BUSCA[0]);
+// --- Critérios de chegada ---
+const float DIST_ALVO = 0.60;   // (m) considera "perto o suficiente" abaixo disso
+const float ANG_ALVO  = 8.0;    // (graus) considera "centralizado" abaixo disso
 
 // ======================================================================================
 // Controle de tempo dos passos (não bloqueante - nada de delay())
 // ======================================================================================
 unsigned long tempoPasso = 0;   // millis() em que o passo/pausa atual começou
-bool emMovimento = false;       // true = andando neste passo | false = pausa
-int  passoBuscaIdx = 0;         // qual passo da SEQ_BUSCA estamos
+bool emMovimento = false;       // true = andando/girando neste passo | false = pausa
+
+// --- Sub-fases da busca ---
+enum FaseBusca { GIRANDO, AVANCANDO };
+FaseBusca faseBusca = GIRANDO;
+int contadorFase = 0;           // conta passos já feitos na fase atual
 
 // ======================================================================================
 // Controle Manual do Robô  (IGUALZINHO ao original - não mexi em nada aqui)
@@ -107,18 +112,8 @@ void m2Frente(int v) { digitalWrite(segundoMotorPin1, LOW);  analogWrite(segundo
 void m2Tras(int v)   { analogWrite(segundoMotorPin1, v);     digitalWrite(segundoMotorPin2, LOW); }
 
 void andarFrente(int v)   { m1Frente(v); m2Frente(v); }   // as duas pra frente
-void girarDireita(int v)  { m1Frente(v); m2Tras(v);   }   // esquerda frente, direita ré (= irParaDireita)
-void girarEsquerda(int v) { m1Tras(v);   m2Frente(v); }   // esquerda ré, direita frente (= irParaEsquerda)
-
-// Executa uma ação da sequência de busca
-void executaAcaoBusca(int codigo) {
-  switch (codigo) {
-    case 0: andarFrente(VEL_PROCURA);   Serial.println("Busca: frente");   break;
-    case 1: girarDireita(VEL_PROCURA);  Serial.println("Busca: direita");  break;
-    case 2: girarEsquerda(VEL_PROCURA); Serial.println("Busca: esquerda"); break;
-    default: parar(); break;
-  }
-}
+void girarDireita(int v)  { m1Frente(v); m2Tras(v);   }   // gira no eixo p/ direita (= irParaDireita)
+void girarEsquerda(int v) { m1Tras(v);   m2Frente(v); }   // gira no eixo p/ esquerda (= irParaEsquerda)
 
 // ======================================================================================
 // Transições entre estados (sempre param os motores ao trocar)
@@ -126,7 +121,8 @@ void executaAcaoBusca(int codigo) {
 void entrarProcura() {
   parar();
   estadoAtual = PROCURANDO;
-  passoBuscaIdx = 0;
+  faseBusca = GIRANDO;      // começa procurando girando no próprio eixo
+  contadorFase = 0;
   emMovimento = false;
   tempoPasso = millis();
   Serial.println("ESTADO: PROCURANDO");
@@ -147,9 +143,11 @@ void entrarAlvoAlcancado() {
 }
 
 // ======================================================================================
-// PROCURANDO: passos curtos em loop (frente -> direita -> esquerda -> frente -> ...)
-// A cada passo ele anda um pouco, PARA, e nessa pausa a câmera consegue enxergar.
-// Se a tag certa aparecer (visao_valida vira true), a máquina troca para APROXIMANDO.
+// PROCURANDO (nova lógica):
+//   1) GIRA no próprio eixo em passinhos, parando pra olhar a cada um.
+//   2) Se ver a tag em qualquer passo -> vai pra APROXIMANDO (tratado na máq. de estados).
+//   3) Se completar uma volta inteira sem achar -> anda alguns passos pra frente.
+//   4) Volta a girar. E assim por diante.
 // ======================================================================================
 void executaProcura() {
   unsigned long agora = millis();
@@ -160,10 +158,32 @@ void executaProcura() {
     tempoPasso = agora;
 
     if (emMovimento) {
-      executaAcaoBusca(SEQ_BUSCA[passoBuscaIdx]);   // começa o passo atual
+      // --- Começa um passo de MOVIMENTO conforme a fase atual ---
+      if (faseBusca == GIRANDO) {
+        girarDireita(VEL_PROCURA);
+        Serial.println("Busca: girando no eixo");
+      } else {
+        andarFrente(VEL_PROCURA);
+        Serial.println("Busca: seguindo em frente");
+      }
     } else {
-      parar();                                       // pausa para "olhar"
-      passoBuscaIdx = (passoBuscaIdx + 1) % NUM_PASSOS;  // prepara o próximo passo
+      // --- Terminou um passo de movimento: para pra olhar e contabiliza ---
+      parar();
+      contadorFase++;
+
+      if (faseBusca == GIRANDO) {
+        if (contadorFase >= PASSOS_POR_VOLTA) {   // deu uma volta completa
+          contadorFase = 0;
+          faseBusca = AVANCANDO;                   // agora anda pra frente
+          Serial.println("Volta completa, vou avancar.");
+        }
+      } else { // AVANCANDO
+        if (contadorFase >= PASSOS_AVANCO) {
+          contadorFase = 0;
+          faseBusca = GIRANDO;                     // recomeça girando pra procurar
+          Serial.println("Avancei, vou girar de novo.");
+        }
+      }
     }
   }
 }
@@ -218,7 +238,7 @@ void executaMaquinaDeEstados() {
 
     case PROCURANDO:
       if (visao_valida) entrarAproximacao();    // achou a tag certa
-      else              executaProcura();       // continua procurando em passos
+      else              executaProcura();       // continua procurando (gira/avança)
       break;
 
     case APROXIMANDO:
