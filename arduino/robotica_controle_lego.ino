@@ -12,9 +12,6 @@ int segundoMotorPin2 = 5;
 int motorElevarPin1 = 6;
 int motorElevarPin2 = 7;
 
-int primeiroMotorEncoder = 18;
-int segundoMotorEncoder = 19;
-
 // ======================================================================================
 // Estado geral do robô
 // ======================================================================================
@@ -27,63 +24,47 @@ EstadoRobo estadoAtual = IDLE;
 
 // --- Dados mais recentes vindos da visão (Raspberry) ---
 float visao_dist = 0.0;      // distância (m) até a tag alvo  -> vem do "tz"
-float visao_ang  = 0.0;      // ângulo (graus) até a tag alvo -> vem do "bearing" (>0 = à direita)
+float visao_ang  = 0.0;      // ângulo (graus) até a tag alvo -> "bearing" (>0 = tag à direita)
 bool  visao_valida = false;  // true = estamos enxergando a tag alvo agora
-unsigned long tempoUltimaVisao = 0;              // millis() do último VIS_COMP com o id correto
-const unsigned long TIMEOUT_VISAO = 500;         // ms sem ver a tag => consideramos "perdida"
+unsigned long tempoUltimaVisao = 0;
+const unsigned long TIMEOUT_VISAO = 1500;  // ms sem ver a tag => consideramos "perdida"
 
 // ======================================================================================
-// Parâmetros de controle (AJUSTE ESTES TESTANDO NO CHÃO)!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// PARÂMETROS DE AJUSTE  (mexa aqui testando no chão)
 // ======================================================================================
+
+// --- Velocidade (PWM, 0 a 255). SEM PID: é a força que vai direto pro motor. ---
+// Comece baixo. Se o robô não sair do lugar, aumente. Se andar rápido demais, diminua.
+const int VEL_PROCURA = 140;   // velocidade durante a busca
+const int VEL_APROX   = 150;   // velocidade durante a aproximação
+
+// --- Duração dos "passos curtos" (ms) ---
+// MOVER = quanto tempo ele anda em cada passo. PAUSA = quanto tempo ele para
+// entre um passo e outro (parado a câmera enxerga melhor, sem borrão).
+const unsigned long PROC_MOVER_MS  = 350;   // passo de busca: tempo andando
+const unsigned long PROC_PAUSA_MS  = 400;   // passo de busca: tempo parado olhando
+const unsigned long APROX_MOVER_MS = 250;   // passo de aproximação: tempo andando
+const unsigned long APROX_PAUSA_MS = 350;   // passo de aproximação: tempo parado
 
 // --- Critérios de chegada ---
-const float DIST_ALVO = 0.25;   // (m) para de aproximar quando fica mais perto que isso
-const float ANG_ALVO  = 8.0;    // (graus) tolerância angular final para considerar "chegou"
-const float ANG_MORTO = 3.0;    // (graus) zona morta: abaixo disso não corrige ângulo
+const float DIST_ALVO = 0.25;   // (m) considera "perto o suficiente" abaixo disso
+const float ANG_ALVO  = 8.0;    // (graus) considera "centralizado" abaixo disso
 
-// --- Velocidades base (RPM) ---
-const float V_APROX     = 90.0;   // avanço na aproximação
-const float V_PROCURA   = 55.0;   // avanço lento durante a varredura de busca
-const float GIRO_PROCURA = 45.0;  // amplitude do "olhar de um lado pro outro" na busca
-const unsigned long PERIODO_SWEEP = 3000; // (ms) período de uma varredura completa
-
-// --- Ganho do controle de ângulo na aproximação ---
-const float K_ANG    = 1.5;     // RPM de giro por grau de erro angular
-const float GIRO_MAX = 80.0;    // saturação do termo de giro (RPM)
+// --- Sequência de busca (edite à vontade!) ---
+// Códigos: 0 = frente, 1 = vira direita, 2 = vira esquerda
+// O padrão {0,1,2,0} faz: frente -> direita -> esquerda -> frente -> (repete)
+const int SEQ_BUSCA[] = {0, 1, 2, 0};
+const int NUM_PASSOS = sizeof(SEQ_BUSCA) / sizeof(SEQ_BUSCA[0]);
 
 // ======================================================================================
-// Variáveis do Encoder e PID
+// Controle de tempo dos passos (não bloqueante - nada de delay())
 // ======================================================================================
-volatile long pulsosMotor1 = 0;
-volatile long pulsosMotor2 = 0;
-
-const float FUROS_POR_VOLTA = 20.0;
-
-// Direção lógica comandada de cada roda (+1 frente / -1 ré).
-// Como o encoder é de canal único (não mede sentido), usamos o sentido
-// que MANDAMOS para "assinar" o RPM medido. Sem isso o PID não gira o robô.
-volatile int sentidoM1 = 1;
-volatile int sentidoM2 = 1;
-
-// Sinal físico de cada motor. Se a roda girar ao contrário do esperado,
-// troque o +1 por -1 (calibração de fiação/montagem).
-const int SENTIDO_M1 = 1;
-const int SENTIDO_M2 = 1;
-
-float setpoint_RPM_M1 = 0.0;   // alvo de velocidade da roda esquerda (+ = frente)
-float setpoint_RPM_M2 = 0.0;   // alvo de velocidade da roda direita  (+ = frente)
-
-unsigned long tempoAnteriorPID = 0;
-float erroAcumulado_M1 = 0, erroAnterior_M1 = 0;
-float erroAcumulado_M2 = 0, erroAnterior_M2 = 0;
-
-float Kp = 2.0;
-float Ki = 5.0;
-float Kd = 0.1;
-const float LIMITE_INTEGRAL = 150.0;  // anti-windup
+unsigned long tempoPasso = 0;   // millis() em que o passo/pausa atual começou
+bool emMovimento = false;       // true = andando neste passo | false = pausa
+int  passoBuscaIdx = 0;         // qual passo da SEQ_BUSCA estamos
 
 // ======================================================================================
-// Controle Manual do Robô
+// Controle Manual do Robô  (IGUALZINHO ao original - não mexi em nada aqui)
 // ======================================================================================
 void irParaTras() {
   digitalWrite(primeiroMotorPin1, HIGH); digitalWrite(primeiroMotorPin2, LOW);
@@ -116,222 +97,185 @@ void pararElevacao() {
 }
 
 // ======================================================================================
-// Baixo nível: encoders + PID de velocidade
+// Movimento AUTOMÁTICO devagar (PWM fixo, SEM PID)
+// Usa a MESMA convenção de sentido do modo manual, só que com velocidade reduzida.
+// "Frente" de cada roda = Pin1 LOW + PWM no Pin2 (igual ao irParaFrente).
 // ======================================================================================
-void lerPrimeiroMotor() { pulsosMotor1++; }
-void lerSegundoMotor()  { pulsosMotor2++; }
+void m1Frente(int v) { digitalWrite(primeiroMotorPin1, LOW); analogWrite(primeiroMotorPin2, v); }
+void m1Tras(int v)   { analogWrite(primeiroMotorPin1, v);    digitalWrite(primeiroMotorPin2, LOW); }
+void m2Frente(int v) { digitalWrite(segundoMotorPin1, LOW);  analogWrite(segundoMotorPin2, v); }
+void m2Tras(int v)   { analogWrite(segundoMotorPin1, v);     digitalWrite(segundoMotorPin2, LOW); }
 
-// Atuador: recebe PWM LÓGICO (+ = frente) e aplica na ponte H.
-void controlaMotoresPWM(int pwm1, int pwm2) {
-  // --- NOVO: Trava de Segurança (Saturação) ---
-  // Garante que o Arduino nunca sofra overflow enviando valores > 255 ou < -255
-  pwm1 = constrain(pwm1, -255, 255);
-  pwm2 = constrain(pwm2, -255, 255);
+void andarFrente(int v)   { m1Frente(v); m2Frente(v); }   // as duas pra frente
+void girarDireita(int v)  { m1Frente(v); m2Tras(v);   }   // esquerda frente, direita ré (= irParaDireita)
+void girarEsquerda(int v) { m1Tras(v);   m2Frente(v); }   // esquerda ré, direita frente (= irParaEsquerda)
 
-  // Guarda o sentido lógico para "assinar" o RPM medido depois.
-  sentidoM1 = (pwm1 >= 0) ? 1 : -1;
-  sentidoM2 = (pwm2 >= 0) ? 1 : -1;
-
-  // Aplica o sinal físico de cada motor (calibração de montagem).
-  int p1 = SENTIDO_M1 * pwm1;
-  int p2 = SENTIDO_M2 * pwm2;
-
-  // Motor 1 (Esquerda) - FRENTE é Pin1 LOW e Pin2 PWM
-  if (p1 >= 0) { 
-    digitalWrite(primeiroMotorPin1, LOW); 
-    analogWrite(primeiroMotorPin2, p1); 
-  } else { 
-    analogWrite(primeiroMotorPin1, abs(p1)); 
-    digitalWrite(primeiroMotorPin2, LOW); 
-  }
-
-  // Motor 2 (Direita) - FRENTE é Pin1 LOW e Pin2 PWM
-  if (p2 >= 0) { 
-    digitalWrite(segundoMotorPin1, LOW); 
-    analogWrite(segundoMotorPin2, p2); 
-  } else { 
-    analogWrite(segundoMotorPin1, abs(p2)); 
-    digitalWrite(segundoMotorPin2, LOW); 
+// Executa uma ação da sequência de busca
+void executaAcaoBusca(int codigo) {
+  switch (codigo) {
+    case 0: andarFrente(VEL_PROCURA);   Serial.println("Busca: frente");   break;
+    case 1: girarDireita(VEL_PROCURA);  Serial.println("Busca: direita");  break;
+    case 2: girarEsquerda(VEL_PROCURA); Serial.println("Busca: esquerda"); break;
+    default: parar(); break;
   }
 }
 
-// Roda a cada 100 ms: fecha a malha de velocidade das duas rodas.
-void atualizaVelocidadeRodas() {
-  unsigned long tempoAtual = millis();
-  float dt = (tempoAtual - tempoAnteriorPID) / 1000.0;
-
-  if (dt >= 0.1) {
-    // ====================================================================
-    // NOVO: Trava de Parada Absoluta! 
-    // Se a ordem for parar, não calcula PID, apenas corta a energia.
-    // ====================================================================
-    if (setpoint_RPM_M1 == 0.0 && setpoint_RPM_M2 == 0.0) {
-      parar();
-      zeraPID(); // Limpa qualquer "sujeira" matemática acumulada
-      noInterrupts();
-      pulsosMotor1 = 0;
-      pulsosMotor2 = 0;
-      interrupts();
-      tempoAnteriorPID = tempoAtual;
-      return; // Interrompe a função aqui, impedindo o robô de tremer
-    }
-
-    // Copia e zera os contadores com as interrupções desligadas (evita corrida).
-    noInterrupts();
-    long p1 = pulsosMotor1;
-    long p2 = pulsosMotor2;
-    pulsosMotor1 = 0;
-    pulsosMotor2 = 0;
-    interrupts();
-    tempoAnteriorPID = tempoAtual;
-
-    // RPM ASSINADO: magnitude medida * sentido que mandamos.
-    float rpm_M1 = sentidoM1 * (p1 / FUROS_POR_VOLTA) / dt * 60.0;
-    float rpm_M2 = sentidoM2 * (p2 / FUROS_POR_VOLTA) / dt * 60.0;
-
-    // PID Motor 1
-    float erro_M1 = setpoint_RPM_M1 - rpm_M1;
-    erroAcumulado_M1 += erro_M1 * dt;
-    erroAcumulado_M1 = constrain(erroAcumulado_M1, -LIMITE_INTEGRAL, LIMITE_INTEGRAL);
-    float derivativo_M1 = (erro_M1 - erroAnterior_M1) / dt;
-    int pwm_M1 = (Kp * erro_M1) + (Ki * erroAcumulado_M1) + (Kd * derivativo_M1);
-    erroAnterior_M1 = erro_M1;
-
-    // PID Motor 2
-    float erro_M2 = setpoint_RPM_M2 - rpm_M2;
-    erroAcumulado_M2 += erro_M2 * dt;
-    erroAcumulado_M2 = constrain(erroAcumulado_M2, -LIMITE_INTEGRAL, LIMITE_INTEGRAL);
-    float derivativo_M2 = (erro_M2 - erroAnterior_M2) / dt;
-    int pwm_M2 = (Kp * erro_M2) + (Ki * erroAcumulado_M2) + (Kd * derivativo_M2);
-    erroAnterior_M2 = erro_M2;
-
-    pwm_M1 = constrain(pwm_M1, -255, 255);
-    pwm_M2 = constrain(pwm_M2, -255, 255);
-    controlaMotoresPWM(pwm_M1, pwm_M2);
-  }
+// ======================================================================================
+// Transições entre estados (sempre param os motores ao trocar)
+// ======================================================================================
+void entrarProcura() {
+  parar();
+  estadoAtual = PROCURANDO;
+  passoBuscaIdx = 0;
+  emMovimento = false;
+  tempoPasso = millis();
+  Serial.println("ESTADO: PROCURANDO");
 }
 
-void zeraPID() {
-  setpoint_RPM_M1 = 0; setpoint_RPM_M2 = 0;
-  erroAcumulado_M1 = 0; erroAcumulado_M2 = 0;
-  erroAnterior_M1 = 0; erroAnterior_M2 = 0;
+void entrarAproximacao() {
+  parar();
+  estadoAtual = APROXIMANDO;
+  emMovimento = false;
+  tempoPasso = millis();
+  Serial.println("ESTADO: APROXIMANDO");
+}
+
+void entrarAlvoAlcancado() {
+  parar();
+  estadoAtual = ALVO_ALCANCADO;
+  Serial.println("ESTADO: ALVO_ALCANCADO");
 }
 
 // ======================================================================================
-// Máquina de estados do modo automático
+// PROCURANDO: passos curtos em loop (frente -> direita -> esquerda -> frente -> ...)
+// A cada passo ele anda um pouco, PARA, e nessa pausa a câmera consegue enxergar.
+// Se a tag certa aparecer (visao_valida vira true), a máquina troca para APROXIMANDO.
 // ======================================================================================
-
-// PROCURANDO: anda devagar pra frente serpenteando ("olhando de um lado pro outro")
-// até a câmera enxergar a tag certa (aí chega um VIS_COMP e trocamos de estado).
 void executaProcura() {
-  float fase = sin(2.0 * PI * (float)(millis() % PERIODO_SWEEP) / (float)PERIODO_SWEEP);
-  float giro = GIRO_PROCURA * fase;
-  setpoint_RPM_M1 = V_PROCURA + giro;   // esquerda
-  setpoint_RPM_M2 = V_PROCURA - giro;   // direita
-}
+  unsigned long agora = millis();
+  unsigned long dur = emMovimento ? PROC_MOVER_MS : PROC_PAUSA_MS;
 
-// APROXIMANDO: usa dist/ang do último VIS_COMP para centralizar e chegar perto.
-void executaAproximacao() {
-  float erro_ang = visao_ang;   // queremos levar a 0
+  if (agora - tempoPasso >= dur) {
+    emMovimento = !emMovimento;   // alterna: movendo <-> pausado
+    tempoPasso = agora;
 
-  // Termo de giro proporcional ao erro angular, saturado.
-  float giro = K_ANG * erro_ang;
-  giro = constrain(giro, -GIRO_MAX, GIRO_MAX);
-  if (fabs(erro_ang) < ANG_MORTO) giro = 0;  // não fica "caçando" o zero
-
-  // Avanço: desacelera perto do alvo e reduz quando está muito torto
-  // (assim ele gira mais no lugar antes de avançar).
-  float avanco = V_APROX;
-  float folga = visao_dist - DIST_ALVO;
-  if (folga < 0.10) avanco = V_APROX * (folga / 0.10);   // rampa de frenagem
-  avanco = constrain(avanco, 0.0, V_APROX);
-  float fatorAlinho = 1.0 - min(1.0f, (float)(fabs(erro_ang) / 45.0));
-  avanco *= fatorAlinho;
-
-  setpoint_RPM_M1 = avanco + giro;   // esquerda
-  setpoint_RPM_M2 = avanco - giro;   // direita
-
-  // Chegou? Perto o suficiente E alinhado o suficiente.
-  if (visao_dist <= DIST_ALVO && fabs(visao_ang) <= ANG_ALVO) {
-    estadoAtual = ALVO_ALCANCADO;
-    zeraPID();
-    Serial.println("ESTADO: ALVO_ALCANCADO");
+    if (emMovimento) {
+      executaAcaoBusca(SEQ_BUSCA[passoBuscaIdx]);   // começa o passo atual
+    } else {
+      parar();                                       // pausa para "olhar"
+      passoBuscaIdx = (passoBuscaIdx + 1) % NUM_PASSOS;  // prepara o próximo passo
+    }
   }
 }
 
+// ======================================================================================
+// APROXIMANDO: sem PID, controle simples por passos.
+// Se estiver torto -> gira pro lado da tag. Se estiver centralizado -> anda pra frente.
+// Quando fica perto E centralizado -> para de vez (ALVO_ALCANCADO).
+// ======================================================================================
+void executaAproximacao() {
+  // Chegou? Perto o suficiente E alinhado o suficiente -> trava aqui.
+  if (visao_dist <= DIST_ALVO && fabs(visao_ang) <= ANG_ALVO) {
+    entrarAlvoAlcancado();
+    return;
+  }
+
+  unsigned long agora = millis();
+  unsigned long dur = emMovimento ? APROX_MOVER_MS : APROX_PAUSA_MS;
+
+  if (agora - tempoPasso >= dur) {
+    emMovimento = !emMovimento;
+    tempoPasso = agora;
+
+    if (emMovimento) {
+      if (fabs(visao_ang) > ANG_ALVO) {
+        // Ainda desalinhado: gira no lugar para centralizar a tag.
+        if (visao_ang > 0) girarDireita(VEL_APROX);    // tag à direita -> vira à direita
+        else               girarEsquerda(VEL_APROX);   // tag à esquerda -> vira à esquerda
+      } else {
+        // Centralizado mas ainda longe: avança um passo.
+        andarFrente(VEL_APROX);
+      }
+    } else {
+      parar();   // pausa para receber um VIS_COMP fresco antes do próximo passo
+    }
+  }
+}
+
+// ======================================================================================
+// Máquina de estados (chamada continuamente no modo automático)
+// ======================================================================================
 void executaMaquinaDeEstados() {
-  // Timeout de visão: se faz muito tempo sem VIS_COMP da tag certa, perdemos ela.
+  // Perdeu a tag de vista? (faz tempo demais sem receber VIS_COMP dela)
   if (millis() - tempoUltimaVisao > TIMEOUT_VISAO) {
     visao_valida = false;
   }
 
   switch (estadoAtual) {
     case IDLE:
-      // Sem alvo: fica parado. Sai daqui quando chega um BUSCAR_TAG.
-      setpoint_RPM_M1 = 0; setpoint_RPM_M2 = 0;
+      parar();                                  // sem alvo: fica parado
       break;
 
     case PROCURANDO:
-      if (visao_valida) {                 // achou a tag certa
-        estadoAtual = APROXIMANDO;
-        Serial.println("ESTADO: APROXIMANDO");
-      } else {
-        executaProcura();
-      }
+      if (visao_valida) entrarAproximacao();    // achou a tag certa
+      else              executaProcura();       // continua procurando em passos
       break;
 
     case APROXIMANDO:
-      if (!visao_valida) {                // perdeu a tag -> volta a procurar
-        estadoAtual = PROCURANDO;
-        Serial.println("ESTADO: PROCURANDO (tag perdida)");
+      if (!visao_valida) {                       // perdeu a tag -> volta a procurar
+        Serial.println("Tag perdida, voltando a procurar...");
+        entrarProcura();
       } else {
         executaAproximacao();
       }
       break;
 
     case ALVO_ALCANCADO:
-      setpoint_RPM_M1 = 0; setpoint_RPM_M2 = 0;
+      parar();                                   // chegou: não se move mais
       break;
   }
 }
 
+// ======================================================================================
 // Recebe "VIS_COMP:ID;DIST;ANG" do Raspberry e atualiza os dados da visão.
+// Faço o parsing na mão (indexOf/substring) porque o sscanf com %f do Arduino AVR
+// costuma NÃO ler número decimal e devolver zero. toFloat()/toInt() são confiáveis.
+// ======================================================================================
 void ajustaCaminhoAutomatico(String texto_info) {
-  int id;
-  float dist, ang;
-  int lidos = sscanf(texto_info.c_str(), "VIS_COMP:%d;%f;%f", &id, &dist, &ang);
+  int p1 = texto_info.indexOf(':');
+  int p2 = texto_info.indexOf(';', p1 + 1);
+  int p3 = texto_info.indexOf(';', p2 + 1);
 
-  if (lidos != 3) {
-    Serial.println("Erro: formato da string invalido!");
-    return;
-  }
-  if (id != id_tag) {
-    // Tag detectada, mas não é a que estamos procurando: ignora.
+  if (p1 < 0 || p2 < 0 || p3 < 0) {
+    Serial.println("Erro: formato do VIS_COMP invalido!");
     return;
   }
 
-  // É a tag certa: guarda os dados e marca que estamos enxergando.
+  int   id   = texto_info.substring(p1 + 1, p2).toInt();
+  float dist = texto_info.substring(p2 + 1, p3).toFloat();
+  float ang  = texto_info.substring(p3 + 1).toFloat();
+
+  if (id != id_tag) return;   // tag detectada, mas não é a que procuramos
+
   visao_dist = dist;
   visao_ang  = ang;
   visao_valida = true;
   tempoUltimaVisao = millis();
 }
 
-// Define o alvo (vindo de "BUSCAR_TAG:ID") e entra em modo de busca.
+// Define o alvo (vindo de "BUSCAR_TAG:ID") e começa a busca.
 void definirAlvo(String texto) {
-  int novo_id;
-  if (sscanf(texto.c_str(), "BUSCAR_TAG:%d", &novo_id) == 1) {
-    id_tag = novo_id;
-    visao_valida = false;
-    tempoUltimaVisao = 0;
-    zeraPID();
-    estadoAtual = PROCURANDO;
-    Serial.print("Novo alvo definido: tag ");
-    Serial.println(id_tag);
-    Serial.println("ESTADO: PROCURANDO");
-  } else {
+  int p = texto.indexOf(':');
+  if (p < 0) {
     Serial.println("Erro: BUSCAR_TAG mal formatado!");
+    return;
   }
+  id_tag = texto.substring(p + 1).toInt();
+  visao_valida = false;
+  tempoUltimaVisao = 0;
+  Serial.print("Novo alvo definido: tag ");
+  Serial.println(id_tag);
+  entrarProcura();
 }
 
 // ======================================================================================
@@ -344,13 +288,8 @@ void setup() {
   pinMode(primeiroMotorPin1, OUTPUT); pinMode(primeiroMotorPin2, OUTPUT);
   pinMode(segundoMotorPin1, OUTPUT);  pinMode(segundoMotorPin2, OUTPUT);
   pinMode(motorElevarPin1, OUTPUT);   pinMode(motorElevarPin2, OUTPUT);
-  pinMode(primeiroMotorEncoder, INPUT);
-  pinMode(segundoMotorEncoder, INPUT);
 
-  attachInterrupt(digitalPinToInterrupt(primeiroMotorEncoder), lerPrimeiroMotor, RISING);
-  attachInterrupt(digitalPinToInterrupt(segundoMotorEncoder), lerSegundoMotor, RISING);
-
-  tempoAnteriorPID = millis();
+  parar();
 }
 
 void loop() {
@@ -364,24 +303,21 @@ void loop() {
       Serial.println("Modo manual ativado!");
       modo_manual = true;
       estadoAtual = IDLE;
-      id_tag = -1; // <--- Reseta a Tag para não bugar ao voltar pro automático
-      zeraPID();
+      id_tag = -1;
       parar();
     }
     else if (texto.startsWith("AUTOMATICO")) {
       Serial.println("Modo automático ativado!");
       modo_manual = false;
-      zeraPID();
-      id_tag = -1;       // <--- Reseta a Tag antiga
-      estadoAtual = IDLE; // <--- Sempre inicia parado em IDLE esperando ordem!
+      id_tag = -1;           // começa sem alvo
+      estadoAtual = IDLE;    // só anda depois que receber um BUSCAR_TAG
       parar();
     }
     else if (texto.startsWith("BUSCAR_TAG")) {
-      // Vale em qualquer modo: registra o alvo. A busca só roda em automático.
-      definirAlvo(texto);
+      definirAlvo(texto);    // registra o alvo (a busca só roda no modo automático)
     }
     else if (modo_manual) {
-      // --- Comandos de pilotagem manual ---
+      // --- Comandos de pilotagem manual (inalterados) ---
       if      (texto.startsWith("FRENTE"))      { Serial.println("Indo para frente...");  irParaFrente(); }
       else if (texto.startsWith("DIREITA"))     { Serial.println("Indo para direita...");  irParaDireita(); }
       else if (texto.startsWith("ESQUERDA"))    { Serial.println("Indo para esquerda..."); irParaEsquerda(); }
@@ -393,7 +329,7 @@ void loop() {
       else                                      { Serial.println("Comando não aceito para modo manual!"); }
     }
     else {
-      // --- Modo automático ---
+      // --- Modo automático: só aceita dados da visão ---
       if (texto.startsWith("VIS_COMP")) {
         ajustaCaminhoAutomatico(texto);
       } else {
@@ -402,10 +338,8 @@ void loop() {
     }
   }
 
-  // 2) No modo automático, a máquina de estados decide os setpoints
-  //    e o PID cuida da velocidade das rodas.
+  // 2) No modo automático, a máquina de estados cuida de tudo.
   if (!modo_manual) {
     executaMaquinaDeEstados();
-    atualizaVelocidadeRodas();
   }
 }
