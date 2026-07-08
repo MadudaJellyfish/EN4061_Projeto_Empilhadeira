@@ -13,6 +13,8 @@ PORT = int(os.getenv("PORT"))
 arduino_serial = None 
 modo_automatico = True # Inicia como True, combinando com o servidor.py
 MQTT_PREFIX = "BMML"
+mqtt_client = None
+mqtt_properties = None
 
 
 def mqtt_topic(nome):
@@ -22,6 +24,13 @@ def mqtt_topic(nome):
 def is_modo_automatico():
     global modo_automatico
     return modo_automatico
+
+def publicar_status(mensagem):
+    global mqtt_client, mqtt_properties
+    if not mensagem or mqtt_client is None or mqtt_properties is None:
+        return
+    if mqtt_client.is_connected():
+        mqtt_client.publish(mqtt_topic("status"), mensagem, qos=2, properties=mqtt_properties)
 
 def on_connect(client, userdata, flags, rc):
     print(f"MQTT Conectado com código: {rc}")
@@ -59,22 +68,22 @@ def on_message(client, userdata, msg):
                 arduino_serial.write(f"{comando}\n".encode('utf-8'))
 
 def inicializar_mqtt(referencia_serial):
-    global arduino_serial
+    global arduino_serial, mqtt_client, mqtt_properties
     arduino_serial = referencia_serial
     
-    client = mqtt.Client(client_id="robotica_1b")
+    mqtt_client = mqtt.Client(client_id="robotica_1b")
     #user = os.getenv("USER") 
     #password = os.getenv("PASSWORD") 
-    client.username_pw_set("aula", "zowmad-tavQez")
-    client.tls_set()
+    mqtt_client.username_pw_set("aula", "zowmad-tavQez")
+    mqtt_client.tls_set()
     
-    client.on_connect = on_connect
-    client.on_message = on_message
+    mqtt_client.on_connect = on_connect
+    mqtt_client.on_message = on_message
     
-    properties = Properties(PacketTypes.PUBLISH)
-    properties.MessageExpiryInterval = 120
+    mqtt_properties = Properties(PacketTypes.PUBLISH)
+    mqtt_properties.MessageExpiryInterval = 120
     
-    client.connect("mqtt.janks.dev.br", 8883, keepalive=60)
-    client.loop_start() 
+    mqtt_client.connect("mqtt.janks.dev.br", 8883, keepalive=60)
+    mqtt_client.loop_start() 
     
-    return client
+    return mqtt_client

@@ -150,6 +150,8 @@ def main():
                 linha = ser.readline().decode('utf-8').rstrip()
                 if linha:
                     print(f"Mensagem do Arduino: {linha}")
+                    if linha.startswith("TAG_ENCONTRADA:") or linha.startswith("TAG_PERDIDA:"):
+                        comunicacao_mqtt.publicar_status(linha)
 
             time.sleep(0.01)
 

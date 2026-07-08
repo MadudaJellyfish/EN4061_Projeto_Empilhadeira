@@ -24,6 +24,8 @@ WS_PORT = int(os.getenv("WS_PORT"))
 latest_frame = None
 modo_manual_ativo = False
 MQTT_PREFIX = "BMML"
+root = None
+status_var = None
 
 
 def mqtt_topic(nome):
@@ -42,7 +44,15 @@ estado_teclas = {
 # --- Lógica MQTT (Apenas Comandos) ---
 def on_connect(client, userdata, flags, rc):
     print("Código MQTT conectado:", rc)
-    client.subscribe(mqtt_topic("comando")) 
+    client.subscribe(mqtt_topic("comando"))
+    client.subscribe(mqtt_topic("status"))
+
+
+def atualizar_status(mensagem):
+    global root, status_var
+    if root is not None and status_var is not None and root.winfo_exists():
+        root.after(0, lambda: status_var.set(f"Status: {mensagem}"))
+
 
 def on_message(client, userdata, msg):
     topico = msg.topic
@@ -51,6 +61,10 @@ def on_message(client, userdata, msg):
         print(f"Mensagem recebida no tópico {topico}: {payload}")
     except Exception as e:
         print(f"Erro ao ler payload: {e}")
+
+    if topico == mqtt_topic("status"):
+        atualizar_status(payload)
+        return
 
 def envia_mensagem(msg, topico):
     topico_com_prefixo = mqtt_topic(topico)
@@ -97,9 +111,11 @@ def alternar_modo_manual():
     if modo_manual_ativo:
         btn_modo.config(text="Desativar Modo Manual", bg="#d9534f", fg="white") 
         envia_mensagem("MANUAL", "comando")
+        atualizar_status("Aguardando status...")
     else:
         btn_modo.config(text="Ativar Modo Manual", bg="#5cb85c", fg="white") 
         envia_mensagem("AUTOMATICO", "comando")
+        atualizar_status("Aguardando status...")
         
     root.focus_set() 
 
@@ -150,6 +166,10 @@ client.loop_start()
 root = tk.Tk()
 root.title("Empilhadeira =D")
 root.geometry("800x750")
+
+status_var = tk.StringVar(value="Aguardando status...")
+status_label = tk.Label(root, textvariable=status_var, bg="#1f1f1f", fg="#ffffff", wraplength=720, justify="left", padx=10, pady=8)
+status_label.pack(fill="x", padx=10, pady=(10, 0))
 
 label = tk.Label(root, text="Aguardando imagem...", bg="black", fg="white")
 label.pack(pady=10)

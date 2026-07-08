@@ -140,10 +140,21 @@ void entrarAproximacao() {
   Serial.println("ESTADO: APROXIMANDO");
 }
 
+void informarTagEncontrada(int tagId) {
+  Serial.print("TAG_ENCONTRADA:");
+  Serial.println(tagId);
+}
+
+void informarTagPerdida(int tagId) {
+  Serial.print("TAG_PERDIDA:");
+  Serial.println(tagId);
+}
+
 void entrarAlvoAlcancado() {
   parar();
   estadoAtual = ALVO_ALCANCADO;
   Serial.println("ESTADO: ALVO_ALCANCADO");
+  informarTagEncontrada(id_tag);
 }
 
 // ======================================================================================
@@ -224,6 +235,7 @@ void executaMaquinaDeEstados() {
     case APROXIMANDO:
       if (!visao_valida) {                       // perdeu a tag -> volta a procurar
         Serial.println("Tag perdida, voltando a procurar...");
+        informarTagPerdida(id_tag);
         entrarProcura();
       } else {
         executaAproximacao();
